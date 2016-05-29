@@ -155,8 +155,28 @@ def unPack(buf):
     print '                %9.4f %9.4f %9.4f %9.4f %9.4f %9.4f %9.4f'%(ang,cx,cy,cw,ch,k_h,k_v)
     print ''
     
-    
+def dt_auditSidecar(conn,photoID):
+    '''
+        TODO: Create this
+        Audit the sidecar file of the specified photo.  Make sure all of the settings that
+        are contained in the database, are also contained in the sidecar.  This is so that
+        we do not lose any information during archival.
+    '''
 
+    pass
+
+def dt_archive(conn, srcPhotoID, destDirectory):
+    '''
+        Archive the specified film roll.  Archival consists of moving the files into the
+        specified target directory and then removing the film roll containing those files
+        from the Darktable database.  At some point we will also include auditing of the
+        sidecar files to make sure they are current before deleting the database record.
+        The directory structure will follow default Darktable directory structure, so
+        if the archive is stored under /mnt/BigDisk/PhotoArchive, then a film roll
+        might be /mnt/BigDisk/PhotoArchive/20160512_JoesBirthdayParty.
+    '''
+
+    pass
 
 def dt_mv(conn,src,dest):
     '''
@@ -772,11 +792,23 @@ def dt():
             vblob = c.execute('select settings from settings').fetchone()[0]
             dbVer = getVersion(vblob)
             if dbVer != 34 and dbVer != 36:
-                raise Exception('%s '%args.dtdb + 'version %d is not 34 or 36!'%dbVer)
+                raise Exception('%s '%args.dtdb + 'version %d is not old format 34 or 36!'%dbVer)
             
+        except sqlite3.OperationalError, e:
+            if str(e)[0:13] == 'no such table':
+                print "Line 799"
+                dbVer = int(c.execute('select value from db_info where key= :keyFld', {'keyFld':'version'}).fetchone()[0])
+                if dbVer != 8:
+                    raise Exception ('%s '%args.dtdb + 'version %d is not new format 8!'%dbVer)
+                else:
+                    print 'Using newer Darktable DB format'
+            else:
+                print 'SQLite3 Operational Error detected: ' + str(e)
+                raise Exception('%s '%args.dtdb + 'does not appear to be an intact Darktable database')
+        
         except:
-            #print 'error: ',sys.exc_info()
-            raise Exception('%s '%args.dtdb + 'does not appear to be a Darktable database')
+            print 'error: ',sys.exc_info()
+            raise Exception('%s '%args.dtdb + 'does not appear to be an intact Darktable database')
 
     except:
         print 'darktable db error: %s '%sys.exc_info()[1]
