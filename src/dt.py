@@ -22,7 +22,7 @@ Copyright 2012 Wayne Vosberg <wayne.vosberg@mindtunnel.com>
 
 '''
 
-db schema version 36:
+db schema version 36: (Old database format)
 
 CREATE TABLE color_labels (imgid integer, color integer);
 CREATE TABLE film_rolls (id integer primary key, datetime_accessed char(20), folder varchar(1024));
@@ -63,6 +63,60 @@ CREATE TABLE tags (id integer primary key, name varchar, icon blob, description 
 CREATE TABLE tagxtag (id1 integer, id2 integer, count integer, primary key(id1, id2));
 CREATE INDEX group_id_index on images (group_id);
 CREATE INDEX imgid_index on history (imgid);
+
+db schema version 8: (New database format)
+
+CREATE TABLE db_info (key VARCHAR PRIMARY KEY, value VARCHAR);
+CREATE TABLE film_rolls (id INTEGER PRIMARY KEY, datetime_accessed CHAR(20), folder VARCHAR(1024) NOT NULL);
+CREATE INDEX film_rolls_folder_index ON film_rolls (folder);
+CREATE TABLE images (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, film_id INTEGER, width INTEGER, 
+        height INTEGER, filename VARCHAR, maker VARCHAR, model VARCHAR, lens VARCHAR, exposure REAL, aperture REAL,
+        iso REAL, focal_length REAL, focus_distance REAL, datetime_taken CHAR(20), flags INTEGER, output_width INTEGER,
+        output_height INTEGER, crop REAL, raw_parameters INTEGER, raw_denoise_threshold REAL, raw_auto_bright_threshold REAL,
+        raw_black INTEGER, raw_maximum INTEGER, caption VARCHAR, description VARCHAR, license VARCHAR, sha1sum CHAR(40),
+        orientation INTEGER, histogram BLOB, lightmap BLOB, longitude REAL, latitude REAL, color_matrix BLOB, colorspace INTEGER,
+        version INTEGER, max_version INTEGER, write_timestamp INTEGER);
+CREATE INDEX images_group_id_index ON images (group_id);
+CREATE INDEX images_film_id_index ON images (film_id);
+CREATE INDEX images_filename_index ON images (filename);
+CREATE TABLE selected_images (imgid INTEGER PRIMARY KEY);
+CREATE TABLE history (imgid INTEGER, num INTEGER, module INTEGER, operation VARCHAR(256), op_params BLOB, enabled INTEGER,
+        blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256));
+CREATE INDEX history_imgid_index ON history (imgid);
+CREATE TABLE mask (imgid INTEGER, formid INTEGER, form INTEGER, name VARCHAR(256), version INTEGER, points BLOB, 
+        points_count INTEGER, source BLOB);
+CREATE TABLE tags (id INTEGER PRIMARY KEY, name VARCHAR, icon BLOB, description VARCHAR, flags INTEGER);
+CREATE TABLE tagged_images (imgid INTEGER, tagid INTEGER, PRIMARY KEY (imgid, tagid));
+CREATE INDEX tagged_images_tagid_index ON tagged_images (tagid);
+CREATE TABLE tagxtag (id1 INTEGER, id2 INTEGER, count INTEGER, PRIMARY KEY (id1, id2));
+
+CREATE TRIGGER insert_tag AFTER INSERT ON tags BEGIN   INSERT INTO tagxtag SELECT id, new.id, 0 FROM TAGS;
+        UPDATE tagxtag SET count = 1000000 WHERE id1=new.id AND id2=new.id; END;
+CREATE TRIGGER delete_tag BEFORE DELETE on tags BEGIN   DELETE FROM tagxtag WHERE id1=old.id OR id2=old.id;
+        DELETE FROM tagged_images WHERE tagid=old.id; END;
+CREATE TRIGGER attach_tag AFTER INSERT ON tagged_images BEGIN   UPDATE tagxtag     SET count = count + 1
+        WHERE (id1=new.tagid AND id2 IN (SELECT tagid FROM tagged_images WHERE imgid=new.imgid))
+        OR (id2=new.tagid AND id1 IN (SELECT tagid FROM tagged_images WHERE imgid=new.imgid)); END;
+CREATE TRIGGER detach_tag BEFORE DELETE ON tagged_images BEGIN   UPDATE tagxtag     SET count = count - 1
+        WHERE (id1=old.tagid AND id2 IN (SELECT tagid FROM tagged_images WHERE imgid=old.imgid))
+        OR (id2=old.tagid AND id1 IN (SELECT tagid FROM tagged_images WHERE imgid=old.imgid)); END;
+
+CREATE TABLE styles (id INTEGER, name VARCHAR, description VARCHAR);
+CREATE TABLE style_items (styleid INTEGER, num INTEGER, module INTEGER, operation VARCHAR(256), op_params BLOB, enabled INTEGER,
+        blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256));
+CREATE TABLE color_labels (imgid INTEGER, color INTEGER);
+CREATE UNIQUE INDEX color_labels_idx ON color_labels (imgid, color);
+CREATE TABLE meta_data (id INTEGER, key INTEGER, value VARCHAR);
+CREATE INDEX metadata_index ON meta_data (id, key);
+CREATE TABLE presets (name VARCHAR, description VARCHAR, operation VARCHAR, op_version INTEGER, op_params BLOB, enabled INTEGER,
+        blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256), model VARCHAR, maker VARCHAR,
+        lens VARCHAR, iso_min REAL, iso_max REAL, exposure_min REAL, exposure_max REAL, aperture_min REAL, aperture_max REAL,
+        focal_length_min REAL, focal_length_max REAL, writeprotect INTEGER, autoapply INTEGER, filter INTEGER, def INTEGER, format INTEGER);
+CREATE UNIQUE INDEX presets_idx ON presets(name, operation, op_version);
+CREATE TABLE legacy_presets (name varchar, description varchar, operation varchar, op_version integer, op_params blob, enabled integer,
+        blendop_params blob, blendop_version integer, multi_priority integer, multi_name varchar, model varchar, maker varchar, lens varchar,
+        iso_min real, iso_max real, exposure_min real, exposure_max real, aperture_min real, aperture_max real, focal_length_min real,
+        focal_length_max real, writeprotect integer, autoapply integer, filter integer, def integer, format integer);
 
 '''
 
@@ -165,7 +219,7 @@ def dt_auditSidecar(conn,photoID):
 
     pass
 
-def dt_archive(conn, srcPhotoID, destDirectory):
+def dt_archiveRoll(conn, srcRollID, destDirectory):
     '''
         Archive the specified film roll.  Archival consists of moving the files into the
         specified target directory and then removing the film roll containing those files
@@ -175,6 +229,33 @@ def dt_archive(conn, srcPhotoID, destDirectory):
         if the archive is stored under /mnt/BigDisk/PhotoArchive, then a film roll
         might be /mnt/BigDisk/PhotoArchive/20160512_JoesBirthdayParty.
     '''
+
+    # First, get the images in this film roll.
+
+    frlCurs = conn.cursor()
+
+    frlImList = frlCurs.execute("SELECT filename FROM images WHERE film_id = :frlId", {"frlId": srcRollID}).fetchall()
+    frlFldr = frlCurs.execute("SELECT folder FROM film_rolls WHERE id = :frlId", {"frlId": srcRollID}).fetchone()
+
+    # Next, create the directory in the destination.
+
+    dirToCreate = destDirectory + '/' + frlFldr
+    os.mkdir(dirToCreate)
+
+    # Start copying the files into place
+
+    targetDir = dirToCreate + '/'
+    
+    for filename in frlImList:
+
+        print 'Working on ' + filename
+
+        # Does the file actually exist at the reported location?  We might be working with an orphaned
+        # film roll link.  Alternately- I need to include an option to omit some rolls, since some of
+        # them may already have been archived.
+        
+        print 'Copying ' + filename + ' to ' + targetDir + filename
+
 
     pass
 
@@ -796,7 +877,6 @@ def dt():
             
         except sqlite3.OperationalError, e:
             if str(e)[0:13] == 'no such table':
-                print "Line 799"
                 dbVer = int(c.execute('select value from db_info where key= :keyFld', {'keyFld':'version'}).fetchone()[0])
                 if dbVer != 8:
                     raise Exception ('%s '%args.dtdb + 'version %d is not new format 8!'%dbVer)
